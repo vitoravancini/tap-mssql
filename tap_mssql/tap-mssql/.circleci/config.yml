@@ -1,0 +1,85 @@
+version: 2
+jobs:
+  build:
+    docker:
+      - image: clojure:lein-2.5.3
+      - image: mcr.microsoft.com/mssql/server:2017-latest
+        environment:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: Password1!
+    steps:
+      - checkout
+      - restore_cache:
+          key: dependency-cache-{{ checksum "project.clj" }}
+      - run:
+          name: 'Install Dockerize'
+          command: wget https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz && tar -C /usr/local/bin -xzvf dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz && rm dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz
+          environment:
+            DOCKERIZE_VERSION: v0.3.0
+      - run:
+          name: 'Wait for MSSQL Docker'
+          command: |
+            dockerize -wait tcp://127.0.0.1:1433 -timeout 1m
+            sleep 5
+      - run:
+          name: Test
+          command: |
+            bin/test
+      - save_cache:
+          key: dependency-cache-{{ checksum "project.clj" }}
+          paths:
+            - /root/.m2
+  tap_tester:
+    docker:
+      - image: 218546966473.dkr.ecr.us-east-1.amazonaws.com/circle-ci:tap-tester-clj
+      - image: mcr.microsoft.com/mssql/server:2017-latest
+        environment:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: Password1!
+    steps:
+      - checkout
+      - run:
+          name: 'Install Dockerize'
+          command: wget https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz && tar -C /usr/local/bin -xzvf dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz && rm dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz
+          environment:
+            DOCKERIZE_VERSION: v0.3.0
+      - run:
+          name: 'Wait for MSSQL Docker'
+          command: |
+            dockerize -wait tcp://127.0.0.1:1433 -timeout 1m
+            sleep 5
+      - run:
+          name: 'Tap Tester'
+          command: |
+            aws s3 cp s3://com-stitchdata-dev-deployment-assets/environments/tap-tester/sandbox tap-tester.env
+            source tap-tester.env
+            aws s3 cp s3://com-stitchdata-dev-deployment-assets/environments/tap-mssql/sandbox tap-mssql.env
+            source tap-mssql.env
+            source /usr/local/share/virtualenvs/tap-tester/bin/activate
+            cd /root/project/
+            lein deps
+            run-a-test --tap=/root/project/bin/tap-mssql \
+                       --target=target-stitch \
+                       --orchestrator=stitch-orchestrator \
+                       --email=harrison+sandboxtest@stitchdata.com \
+                       --password=$SANDBOX_PASSWORD \
+                       --client-id=50 \
+                       tap_tester.suites.mssql
+workflows:
+  version: 2
+  build_and_test:
+    jobs:
+      - build
+      - tap_tester:
+          requires:
+            - build
+  build_daily:
+    triggers:
+      - schedule:
+          cron: "0 0 * * *"
+          filters:
+            branches:
+              only:
+                - master
+    jobs:
+      - build
